@@ -25,7 +25,7 @@ from paper_downloader.filters import normalize_text, select_by_llm
 from paper_downloader.llm import OpenAICompatibleClient, parse_yes_no
 from paper_downloader.models import Paper
 from paper_downloader.runner import main as runner_main
-from paper_downloader.runner import process_exact_parallel, run
+from paper_downloader.runner import load_input_json_papers, process_exact_parallel, run
 
 
 class UtilityTests(unittest.TestCase):
@@ -114,6 +114,8 @@ class RunnerTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch("paper_downloader.runner.fetch_papers", return_value=papers):
             args = Namespace(
                 conference="iclr",
+                input_json=None,
+                venue=None,
                 year=2025,
                 direction="agents",
                 version="v2",
@@ -133,6 +135,9 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("keywords", all_papers[0])
             status = json.loads((run_dir / "run_status.json").read_text(encoding="utf-8"))
             self.assertEqual(status["version"], "v2")
+            self.assertEqual(status["conference"], "iclr")
+            self.assertEqual(status["venue"], "iclr")
+            self.assertIsNone(status["input_json"])
             self.assertEqual(status["stage"], "json_only")
             self.assertEqual(status["total_papers"], 1)
             self.assertEqual(status["selected_papers"], 0)
@@ -156,6 +161,76 @@ class RunnerTests(unittest.TestCase):
                     "exact",
                     "--review-paper",
                     "review.pdf",
+                ]
+            )
+            self.assertEqual(context.exception.code, 2)
+
+    def test_source_argument_is_required(self):
+        with patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as context:
+            runner_main(
+                [
+                    "--year",
+                    "2025",
+                    "--direction",
+                    "agents",
+                    "--version",
+                    "v2",
+                ]
+            )
+        self.assertEqual(context.exception.code, 2)
+
+    def test_conference_and_input_json_are_mutually_exclusive(self):
+        with TemporaryDirectory() as tmp, patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as context:
+            input_json = Path(tmp) / "papers.json"
+            input_json.write_text("[]", encoding="utf-8")
+            runner_main(
+                [
+                    "--conference",
+                    "iclr",
+                    "--input-json",
+                    str(input_json),
+                    "--venue",
+                    "ACL",
+                    "--year",
+                    "2025",
+                    "--direction",
+                    "agents",
+                    "--version",
+                    "v2",
+                ]
+            )
+        self.assertEqual(context.exception.code, 2)
+
+    def test_input_json_requires_venue(self):
+        with TemporaryDirectory() as tmp, patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as context:
+            input_json = Path(tmp) / "papers.json"
+            input_json.write_text("[]", encoding="utf-8")
+            runner_main(
+                [
+                    "--input-json",
+                    str(input_json),
+                    "--year",
+                    "2025",
+                    "--direction",
+                    "agents",
+                    "--version",
+                    "v2",
+                ]
+            )
+        self.assertEqual(context.exception.code, 2)
+
+    def test_builtin_conference_years_are_limited(self):
+        with patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as context:
+            runner_main(
+                [
+                    "--conference",
+                    "iclr",
+                    "--year",
+                    "2024",
+                    "--direction",
+                    "agents",
+                    "--version",
+                    "v2",
                 ]
             )
         self.assertEqual(context.exception.code, 2)
@@ -225,6 +300,8 @@ class RunnerTests(unittest.TestCase):
 
             args = Namespace(
                 conference="iclr",
+                input_json=None,
+                venue=None,
                 year=2025,
                 direction="agents",
                 version="v1",
@@ -250,6 +327,140 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(status["review_paper"], "review.pdf")
             self.assertEqual(status["definition_file"], str(definition_file))
             self.assertTrue(status["definition_used"])
+
+    def test_v2_input_json_standardizes_custom_source(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_json = tmp_path / "papers.json"
+            input_json.write_text(
+                json.dumps(
+                    [
+                        {
+                            "title": "Custom Paper",
+                            "abstract": "A custom abstract.",
+                            "download_url": "https://example.test/custom.pdf",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = Namespace(
+                conference=None,
+                input_json=input_json,
+                venue="ACL",
+                year=2024,
+                direction="agents",
+                version="v2",
+                review_paper=None,
+                output_dir=tmp_path / "runs",
+                limit=None,
+                force=False,
+                max_workers=1,
+                timeout=5,
+            )
+            run_dir = run(args)
+
+            self.assertEqual(run_dir.parent.name, "acl-2024")
+            all_papers = json.loads((run_dir / "all_papers.json").read_text(encoding="utf-8"))
+            self.assertEqual(all_papers[0]["conference"], "acl")
+            self.assertEqual(all_papers[0]["year"], 2024)
+            self.assertEqual(all_papers[0]["keywords"], [])
+            status = json.loads((run_dir / "run_status.json").read_text(encoding="utf-8"))
+            self.assertIsNone(status["conference"])
+            self.assertEqual(status["venue"], "ACL")
+            self.assertEqual(status["input_json"], str(input_json))
+
+    def test_load_input_json_papers_fills_missing_fields_and_applies_limit(self):
+        with TemporaryDirectory() as tmp:
+            input_json = Path(tmp) / "papers.json"
+            input_json.write_text(
+                json.dumps(
+                    [
+                        {
+                            "title": "First",
+                            "abstract": "Abstract",
+                            "download_url": "https://example.test/1.pdf",
+                        },
+                        {
+                            "conference": "custom",
+                            "year": "2023",
+                            "title": "Second",
+                            "abstract": "Abstract",
+                            "keywords": ["x"],
+                            "download_url": "https://example.test/2.pdf",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            papers = load_input_json_papers(input_json, venue="ACL", year=2024, limit=1)
+            self.assertEqual(len(papers), 1)
+            self.assertEqual(papers[0].conference, "acl")
+            self.assertEqual(papers[0].year, 2024)
+            self.assertEqual(papers[0].keywords, [])
+
+    def test_v1_input_json_uses_same_definition_pipeline(self):
+        with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            input_json = tmp_path / "papers.json"
+            input_json.write_text(
+                json.dumps(
+                    [
+                        {
+                            "title": "Defined Custom Match",
+                            "abstract": "Abstract",
+                            "download_url": "https://example.test/p.pdf",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            definition_file = tmp_path / "definitions" / "agents" / "review-20250101.json"
+            definition_file.parent.mkdir(parents=True)
+            definition_file.write_text(
+                json.dumps(
+                    {
+                        "direction": "agents",
+                        "review_paper": "review.pdf",
+                        "definition": "Agents that improve through feedback.",
+                        "model": "fake-model",
+                        "created_at": "20250101",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            captured = {}
+
+            def fake_process_exact_parallel(args, run_dir, papers_arg, *, llm_client, definition):
+                captured["papers"] = papers_arg
+                captured["definition"] = definition
+                return papers_arg
+
+            args = Namespace(
+                conference=None,
+                input_json=input_json,
+                venue="ACL",
+                year=2024,
+                direction="agents",
+                version="v1",
+                review_paper="review.pdf",
+                output_dir=tmp_path / "runs",
+                limit=None,
+                force=False,
+                max_workers=1,
+                timeout=5,
+            )
+            with (
+                patch("paper_downloader.runner.OpenAICompatibleClient", return_value=object()),
+                patch("paper_downloader.runner.extract_definition_from_review", return_value=definition_file),
+                patch("paper_downloader.runner.process_exact_parallel", side_effect=fake_process_exact_parallel),
+            ):
+                run(args)
+
+            self.assertEqual(captured["definition"], "Agents that improve through feedback.")
+            self.assertEqual(captured["papers"][0].title, "Defined Custom Match")
+            self.assertEqual(captured["papers"][0].conference, "acl")
 
     def test_exact_pipeline_downloads_yes_before_all_llm_finishes_and_preserves_order(self):
         events = []

@@ -11,15 +11,20 @@ from .downloader import download_pdf
 from .fetchers import fetch_papers
 from .http_client import HttpClient
 from .llm import OpenAICompatibleClient
+from .models import Paper
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+BUILTIN_CONFERENCES = {"iclr", "icml", "neurips"}
+BUILTIN_YEARS = {2025, 2026}
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Download ICLR, ICML, and NeurIPS papers by direction.")
-    parser.add_argument("--conference", required=True, choices=["iclr", "icml", "neurips"])
-    parser.add_argument("--year", required=True, type=int, choices=[2025, 2026])
+    parser = argparse.ArgumentParser(description="Download papers by direction from built-in sources or custom JSON.")
+    parser.add_argument("--conference", choices=sorted(BUILTIN_CONFERENCES), help="Built-in source.")
+    parser.add_argument("--input-json", type=Path, help="Custom paper metadata JSON list.")
+    parser.add_argument("--venue", help="Venue/source name for --input-json, such as ACL or CVPR.")
+    parser.add_argument("--year", required=True, type=int)
     parser.add_argument("--direction", required=True)
     parser.add_argument(
         "--review-paper",
@@ -42,6 +47,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    has_builtin = bool(args.conference)
+    has_input_json = bool(args.input_json)
+    if has_builtin == has_input_json:
+        parser.error("provide exactly one of --conference or --input-json")
+    if has_builtin and args.year not in BUILTIN_YEARS:
+        parser.error("--conference currently supports --year 2025 or 2026")
+    if has_input_json and not args.venue:
+        parser.error("--venue is required with --input-json")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be greater than 0")
     if args.max_workers <= 0:
@@ -57,7 +70,7 @@ def run(args: argparse.Namespace) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d")
     run_dir = (
         args.output_dir
-        / f"{args.conference}-{args.year}"
+        / f"{source_slug(args)}-{args.year}"
         / f"{direction_slug(args.direction)}-{timestamp}"
     )
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -79,15 +92,56 @@ def run(args: argparse.Namespace) -> Path:
 
 
 def extract_json(args: argparse.Namespace, run_dir: Path):
-    http_client = HttpClient(timeout=args.timeout)
-    papers = fetch_papers(
-        args.conference,
-        args.year,
-        limit=args.limit,
-        http_client=http_client,
-        max_workers=args.max_workers,
-    )
+    if getattr(args, "input_json", None):
+        papers = load_input_json_papers(
+            args.input_json,
+            venue=args.venue,
+            year=args.year,
+            limit=args.limit,
+        )
+    else:
+        http_client = HttpClient(timeout=args.timeout)
+        papers = fetch_papers(
+            args.conference,
+            args.year,
+            limit=args.limit,
+            http_client=http_client,
+            max_workers=args.max_workers,
+        )
     write_json(run_dir / "all_papers.json", [paper.to_json() for paper in papers])
+    return papers
+
+
+def source_name(args: argparse.Namespace) -> str:
+    return args.conference or args.venue
+
+
+def source_slug(args: argparse.Namespace) -> str:
+    return direction_slug(source_name(args), fallback="source")
+
+
+def load_input_json_papers(
+    input_json: Path,
+    *,
+    venue: str,
+    year: int,
+    limit: int | None = None,
+) -> list[Paper]:
+    data = json.loads(Path(input_json).read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise ValueError("--input-json must contain a JSON list of paper objects")
+
+    papers: list[Paper] = []
+    for index, item in enumerate(data, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"--input-json item {index} must be an object")
+        paper_data = dict(item)
+        paper_data["conference"] = paper_data.get("conference") or venue
+        paper_data["year"] = int(paper_data.get("year") or year)
+        paper_data["keywords"] = paper_data.get("keywords") or []
+        papers.append(Paper.from_json(paper_data))
+        if limit and len(papers) >= limit:
+            break
     return papers
 
 
@@ -195,7 +249,9 @@ def _run_status(
     stage: str,
 ) -> dict:
     return {
-        "conference": args.conference,
+        "conference": getattr(args, "conference", None),
+        "venue": source_name(args),
+        "input_json": str(getattr(args, "input_json", "") or "") or None,
         "year": args.year,
         "direction": args.direction,
         "version": args.version,
