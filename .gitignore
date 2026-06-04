@@ -17,5 +17,10 @@ definitions/*
 review_papers/*
 !review_papers/.gitkeep
 
+!skills/conference-paper-downloader/scripts/conference-paper-downloader/downloads/.gitkeep
+!skills/conference-paper-downloader/scripts/conference-paper-downloader/definitions/.gitkeep
+!skills/conference-paper-downloader/scripts/conference-paper-downloader/review_papers/.gitkeep
+!skills/conference-paper-downloader/scripts/conference-paper-downloader/custom_sources/.gitkeep
+
 *.log
 *.tmp

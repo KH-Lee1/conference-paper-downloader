@@ -1,5 +1,7 @@
 import io
 import json
+import subprocess
+import sys
 import threading
 import unittest
 from argparse import Namespace
@@ -725,6 +727,32 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(papers[0].abstract, "Virtual abstract")
         self.assertEqual(papers[0].download_url, "https://openreview.net/pdf?id=abc123")
         self.assertIn("Deep Learning->Large Language Models", papers[0].keywords)
+
+
+class SkillBundleTests(unittest.TestCase):
+    def test_standalone_skill_scripts_show_help(self):
+        root = Path(__file__).resolve().parents[1]
+        tool_root = root / "skills" / "conference-paper-downloader" / "scripts" / "conference-paper-downloader"
+
+        main_result = subprocess.run(
+            [sys.executable, str(tool_root / "main.py"), "--help"],
+            cwd=tool_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(main_result.returncode, 0, main_result.stderr)
+        self.assertIn("--input-json", main_result.stdout)
+
+        download_result = subprocess.run(
+            [sys.executable, str(tool_root / "download_from_json.py"), "--help"],
+            cwd=tool_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(download_result.returncode, 0, download_result.stderr)
+        self.assertIn("--selected-json", download_result.stdout)
 
 
 if __name__ == "__main__":

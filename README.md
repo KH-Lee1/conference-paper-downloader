@@ -2,6 +2,16 @@
 
 Download papers by research direction using a review-paper definition. Built-in fetchers support ICLR, ICML, and NeurIPS; custom JSON input supports other conferences and journals.
 
+## Codex Skill
+
+This repository includes a standalone Codex skill at:
+
+```text
+skills/conference-paper-downloader
+```
+
+Other users can install only that skill folder from GitHub and still use the downloader, because the skill bundles its own runnable copy under `scripts/conference-paper-downloader`. After installing the skill, restart Codex and ask it to use `conference-paper-downloader`; Codex will install the bundled Python requirements and run the bundled scripts from the installed skill directory.
+
 ## Setup
 
 Install dependencies first:
