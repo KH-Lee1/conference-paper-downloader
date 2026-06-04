@@ -39,7 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=PROJECT_ROOT / "downloads")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--force", action="store_true")
-    parser.add_argument("--max-workers", type=int, default=4)
+    parser.add_argument("--max-workers", type=int, default=32, help="Metadata fetching concurrency.")
+    parser.add_argument("--llm-workers", type=int, default=4, help="LLM paper-screening concurrency for v1.")
+    parser.add_argument("--download-workers", type=int, default=8, help="PDF download concurrency for v1.")
     parser.add_argument("--timeout", type=int, default=30)
     return parser
 
@@ -59,6 +61,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--limit must be greater than 0")
     if args.max_workers <= 0:
         parser.error("--max-workers must be greater than 0")
+    if args.llm_workers <= 0:
+        parser.error("--llm-workers must be greater than 0")
+    if args.download_workers <= 0:
+        parser.error("--download-workers must be greater than 0")
     if args.version == "v1" and not args.review_paper:
         parser.error("--review-paper is required for v1")
 
@@ -186,7 +192,8 @@ def process_exact_parallel(
 ) -> list:
     pdf_dir = run_dir / "pdfs"
     pdf_dir.mkdir(parents=True, exist_ok=True)
-    workers = max(1, int(args.max_workers))
+    llm_workers = worker_count(args, "llm_workers", default=4)
+    download_workers = worker_count(args, "download_workers", default=8)
     download_client = HttpClient(timeout=max(args.timeout, 60))
     selected_by_index = {}
 
@@ -205,8 +212,8 @@ def process_exact_parallel(
             return index, paper, False, exc
 
     with (
-        concurrent.futures.ThreadPoolExecutor(max_workers=workers) as llm_executor,
-        concurrent.futures.ThreadPoolExecutor(max_workers=workers) as download_executor,
+        concurrent.futures.ThreadPoolExecutor(max_workers=llm_workers) as llm_executor,
+        concurrent.futures.ThreadPoolExecutor(max_workers=download_workers) as download_executor,
     ):
         llm_futures = [
             llm_executor.submit(classify, index, paper)
@@ -240,6 +247,10 @@ def process_exact_parallel(
     return [selected_by_index[index] for index in sorted(selected_by_index)]
 
 
+def worker_count(args: argparse.Namespace, name: str, *, default: int) -> int:
+    return max(1, int(getattr(args, name, None) or default))
+
+
 def _run_status(
     args: argparse.Namespace,
     run_dir: Path,
@@ -261,6 +272,9 @@ def _run_status(
         "definition_used": bool(getattr(args, "definition_file", None)),
         "force": bool(args.force),
         "limit": args.limit,
+        "max_workers": args.max_workers,
+        "llm_workers": worker_count(args, "llm_workers", default=4),
+        "download_workers": worker_count(args, "download_workers", default=8),
         "run_dir": str(run_dir),
         "total_papers": len(papers),
         "selected_papers": len(selected),

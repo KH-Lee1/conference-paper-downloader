@@ -62,7 +62,11 @@ Optional arguments:
 - `--output-dir`: defaults to `downloads`
 - `--limit`: limits the number of fetched or loaded papers for testing
 - `--force`: overwrites existing PDF files
-- `--max-workers`: controls LLM and download concurrency
+- `--max-workers`: controls built-in metadata fetching concurrency
+- `--llm-workers`: controls LLM paper-screening concurrency for `v1`
+- `--download-workers`: controls PDF download concurrency for `v1`
+
+Built-in conference fetchers show a terminal progress bar while collecting venue groups, metadata records, or per-paper abstracts. For ICML/PMLR and NeurIPS proceedings, the progress bar tracks the slow per-paper abstract requests; increase `--max-workers` to fetch those pages with more concurrency.
 
 Outputs are written under:
 

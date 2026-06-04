@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import concurrent.futures
 import re
+import sys
+import time
 from html import unescape
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse
@@ -13,6 +15,53 @@ from .models import Paper
 OPENREVIEW_BASE = "https://openreview.net"
 OPENREVIEW_API = "https://api2.openreview.net/notes"
 PMLR_VOLUMES = {("icml", 2025): "v267"}
+
+
+class ProgressBar:
+    def __init__(self, label: str, total: int) -> None:
+        self.label = label
+        self.total = max(0, int(total))
+        self.current = 0
+        self.started_at = time.monotonic()
+        self.last_rendered_at = 0.0
+        self.enabled = self.total > 1
+        if self.enabled:
+            self.render(force=True)
+
+    def update(self, step: int = 1) -> None:
+        if not self.enabled:
+            return
+        self.current = min(self.total, self.current + step)
+        now = time.monotonic()
+        if self.current >= self.total or now - self.last_rendered_at >= 0.1:
+            self.render(force=True)
+
+    def close(self) -> None:
+        if not self.enabled:
+            return
+        self.current = min(self.total, self.current)
+        if self.current < self.total:
+            self.render(force=True)
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+
+    def render(self, *, force: bool = False) -> None:
+        if not self.enabled:
+            return
+        now = time.monotonic()
+        if not force and now - self.last_rendered_at < 0.1:
+            return
+        self.last_rendered_at = now
+        percent = (self.current / self.total) if self.total else 1.0
+        width = 30
+        filled = int(width * percent)
+        bar = "#" * filled + "-" * (width - filled)
+        elapsed = now - self.started_at
+        sys.stderr.write(
+            f"\r{self.label}: |{bar}| {self.current}/{self.total} "
+            f"{percent * 100:5.1f}% elapsed {elapsed:0.1f}s"
+        )
+        sys.stderr.flush()
 
 
 def absolute_url(base_url: str, href: str) -> str:
@@ -46,16 +95,22 @@ def fetch_iclr_openreview(
 ) -> list[Paper]:
     papers: list[Paper] = []
     seen: set[tuple[str, str]] = set()
-    for venue_kind in ("Oral", "Spotlight", "Poster"):
-        venue = f"ICLR {year} {venue_kind}"
-        for note in _fetch_openreview_notes("ICLR", year, venue, client=client):
-            paper = _paper_from_openreview_note(note, "iclr", year)
-            key = (paper.title, paper.download_url)
-            if paper.title and key not in seen:
-                papers.append(paper)
-                seen.add(key)
-                if limit and len(papers) >= limit:
-                    return papers
+    venue_kinds = ("Oral", "Spotlight", "Poster")
+    progress = ProgressBar(f"ICLR {year} venue groups", len(venue_kinds))
+    try:
+        for venue_kind in venue_kinds:
+            venue = f"ICLR {year} {venue_kind}"
+            for note in _fetch_openreview_notes("ICLR", year, venue, client=client):
+                paper = _paper_from_openreview_note(note, "iclr", year)
+                key = (paper.title, paper.download_url)
+                if paper.title and key not in seen:
+                    papers.append(paper)
+                    seen.add(key)
+                    if limit and len(papers) >= limit:
+                        return papers
+            progress.update()
+    finally:
+        progress.close()
     return papers
 
 
@@ -183,25 +238,30 @@ def _papers_from_virtual_data(
     if limit:
         results = results[:limit]
     papers: list[Paper] = []
-    for item in results:
-        item_id = str(item.get("id", ""))
-        title = str(item.get("name", "") or "")
-        abstract = str(item.get("abstract") or abstracts_data.get(item_id, "") or "")
-        keywords = _as_keywords(item.get("keywords", []))
-        topic = str(item.get("topic") or "").strip()
-        if topic:
-            keywords.append(topic)
-        download_url = _virtual_download_url(item, base_url)
-        papers.append(
-            Paper(
-                conference=conference,
-                year=year,
-                title=title,
-                abstract=abstract,
-                keywords=keywords,
-                download_url=download_url,
+    progress = ProgressBar(f"{conference.upper()} {year} records", len(results))
+    try:
+        for item in results:
+            item_id = str(item.get("id", ""))
+            title = str(item.get("name", "") or "")
+            abstract = str(item.get("abstract") or abstracts_data.get(item_id, "") or "")
+            keywords = _as_keywords(item.get("keywords", []))
+            topic = str(item.get("topic") or "").strip()
+            if topic:
+                keywords.append(topic)
+            download_url = _virtual_download_url(item, base_url)
+            papers.append(
+                Paper(
+                    conference=conference,
+                    year=year,
+                    title=title,
+                    abstract=abstract,
+                    keywords=keywords,
+                    download_url=download_url,
+                )
             )
-        )
+            progress.update()
+    finally:
+        progress.close()
     return papers
 
 
@@ -251,7 +311,12 @@ def fetch_pmlr_volume(
             download_url=entry.get("download_url", ""),
         )
 
-    return _parallel_map(build, entries, max_workers=max_workers)
+    return _parallel_map(
+        build,
+        entries,
+        max_workers=max_workers,
+        progress_label=f"{conference.upper()} {year} abstracts",
+    )
 
 
 class _PmlrIndexParser(HTMLParser):
@@ -373,7 +438,12 @@ def fetch_neurips_proceedings(
             download_url=download_url,
         )
 
-    return _parallel_map(build, entries, max_workers=max_workers)
+    return _parallel_map(
+        build,
+        entries,
+        max_workers=max_workers,
+        progress_label=f"NeurIPS {year} abstracts",
+    )
 
 
 class _NeuripsIndexParser(HTMLParser):
@@ -481,11 +551,34 @@ def normalize_space(value: str) -> str:
     return re.sub(r"\s+", " ", unescape(value or "")).strip()
 
 
-def _parallel_map(func, items: list, *, max_workers: int) -> list:
+def _parallel_map(func, items: list, *, max_workers: int, progress_label: str | None = None) -> list:
     if not items:
         return []
     workers = max(1, min(max_workers, len(items)))
+    progress = ProgressBar(progress_label, len(items)) if progress_label else None
+    results = [None] * len(items)
     if workers == 1:
-        return [func(item) for item in items]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        return list(executor.map(func, items))
+        try:
+            for index, item in enumerate(items):
+                results[index] = func(item)
+                if progress:
+                    progress.update()
+        finally:
+            if progress:
+                progress.close()
+        return results
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(func, item): index
+                for index, item in enumerate(items)
+            }
+            for future in concurrent.futures.as_completed(futures):
+                results[futures[future]] = future.result()
+                if progress:
+                    progress.update()
+    finally:
+        if progress:
+            progress.close()
+    return results

@@ -269,6 +269,35 @@ class RunnerTests(unittest.TestCase):
             )
         self.assertEqual(context.exception.code, 2)
 
+    def test_help_includes_separate_llm_and_download_workers(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as stdout, self.assertRaises(SystemExit) as context:
+            runner_main(["--help"])
+        self.assertEqual(context.exception.code, 0)
+        help_text = stdout.getvalue()
+        self.assertIn("--max-workers", help_text)
+        self.assertIn("--llm-workers", help_text)
+        self.assertIn("--download-workers", help_text)
+
+    def test_llm_and_download_workers_must_be_positive(self):
+        for option in ("--llm-workers", "--download-workers"):
+            with self.subTest(option=option):
+                with patch("sys.stderr", new_callable=io.StringIO), self.assertRaises(SystemExit) as context:
+                    runner_main(
+                        [
+                            "--conference",
+                            "iclr",
+                            "--year",
+                            "2025",
+                            "--direction",
+                            "agents",
+                            "--version",
+                            "v2",
+                            option,
+                            "0",
+                        ]
+                    )
+                self.assertEqual(context.exception.code, 2)
+
     def test_v1_extracts_definition_then_processes_papers(self):
         papers = [Paper("iclr", 2025, "Defined Match", "Abstract", ["agent"], "https://example.test/p.pdf")]
         with TemporaryDirectory() as tmp:
@@ -496,7 +525,9 @@ class RunnerTests(unittest.TestCase):
             args = Namespace(
                 direction="agents",
                 force=False,
-                max_workers=2,
+                max_workers=1,
+                llm_workers=2,
+                download_workers=1,
                 timeout=5,
             )
             selected = process_exact_parallel(
@@ -743,6 +774,8 @@ class SkillBundleTests(unittest.TestCase):
         )
         self.assertEqual(main_result.returncode, 0, main_result.stderr)
         self.assertIn("--input-json", main_result.stdout)
+        self.assertIn("--llm-workers", main_result.stdout)
+        self.assertIn("--download-workers", main_result.stdout)
 
         download_result = subprocess.run(
             [sys.executable, str(tool_root / "download_from_json.py"), "--help"],

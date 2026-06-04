@@ -51,6 +51,12 @@ Run a custom JSON source:
 python main.py --input-json "<papers.json>" --venue "<venue>" --year <year> --direction "<direction>" --review-paper "<review.pdf>"
 ```
 
+Concurrency options:
+
+- `--max-workers`: metadata fetching concurrency for built-in sources.
+- `--llm-workers`: LLM paper-screening concurrency for the API workflow.
+- `--download-workers`: PDF download concurrency for the API workflow.
+
 The custom JSON list uses:
 
 ```text
